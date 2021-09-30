@@ -1,196 +1,560 @@
 #! /usr/bin/python
 # -*- coding: utf-8 -*-
-"""vlc media player; based off example in vlc repo:
-`http://git.videolan.org/?p=vlc/bindings/python.git;a=commit;h=HEAD`
 
 
-See also:
-`http://infohost.nmt.edu/tcc/help/pubs/tkinter/web/menu.html`
-`http://infohost.nmt.edu/tcc/help/pubs/tkinter/web/menu-coptions.html`
+# from 
 
+# tkinter example for VLC Python bindings
+# Copyright (C) 2015 the VideoLAN team
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston MA 02110-1301, USA.
+#
+"""A simple example for VLC python bindings using tkinter.
+Requires Python 3.4 or later.
+Author: Patrick Fay
+Date: 23-09-2015
 """
-import os
-import sys
-from functools import partial
-import time
-import pathlib
 
+# Tested with Python 3.7.4, tkinter/Tk 8.6.9 on macOS 10.13.6 only.
+__version__ = '20.05.04'  # mrJean1 at Gmail
+
+# import external libraries
 import vlc
-import tkinter as tk
-from tkinter import ttk
-from tkinter.font import Font
-from tkinter.filedialog import askopenfilename
+# import standard libraries
+import sys
+if sys.version_info[0] < 3:
+    import Tkinter as Tk
+    from Tkinter import ttk
+    from Tkinter.filedialog import askopenfilename
+    from Tkinter.tkMessageBox import showerror
+else:
+    import tkinter as Tk
+    from tkinter import ttk
+    from tkinter.filedialog import askopenfilename
+    from tkinter.messagebox import showerror
+from os.path import basename, expanduser, isfile, join as joined
+from pathlib import Path
+import time
+
+_isMacOS   = sys.platform.startswith('darwin')
+_isWindows = sys.platform.startswith('win')
+_isLinux   = sys.platform.startswith('linux')
+
+if _isMacOS:
+    from ctypes import c_void_p, cdll
+    # libtk = cdll.LoadLibrary(ctypes.util.find_library('tk'))
+    # returns the tk library /usr/lib/libtk.dylib from macOS,
+    # but we need the tkX.Y library bundled with Python 3+,
+    # to match the version number of tkinter, _tkinter, etc.
+    try:
+        libtk = 'libtk%s.dylib' % (Tk.TkVersion,)
+        prefix = getattr(sys, 'base_prefix', sys.prefix)
+        libtk = joined(prefix, 'lib', libtk)
+        dylib = cdll.LoadLibrary(libtk)
+        # getNSView = dylib.TkMacOSXDrawableView is the
+        # proper function to call, but that is non-public
+        # (in Tk source file macosx/TkMacOSXSubwindows.c)
+        # and dylib.TkMacOSXGetRootControl happens to call
+        # dylib.TkMacOSXDrawableView and return the NSView
+        _GetNSView = dylib.TkMacOSXGetRootControl
+        # C signature: void *_GetNSView(void *drawable) to get
+        # the Cocoa/Obj-C NSWindow.contentView attribute, the
+        # drawable NSView object of the (drawable) NSWindow
+        _GetNSView.restype = c_void_p
+        _GetNSView.argtypes = c_void_p,
+        del dylib
+
+    except (NameError, OSError):  # image or symbol not found
+        def _GetNSView(unused):
+            return None
+        libtk = "N/A"
+
+    C_Key = "Command-"  # shortcut key modifier
+
+else:  # *nix, Xwindows and Windows, UNTESTED
+
+    libtk = "N/A"
+    C_Key = "Control-"  # shortcut key modifier
 
 
-class PyPlayer(tk.Frame):
-    def __init__(self, container, container_instance, title=None):
-        tk.Frame.__init__(self, container_instance)
-        self.container = container
-        self.container_instance = container_instance
-        self.initial_directory = pathlib.Path(os.path.expanduser("~"))
-        self.menu_font = Font(family="Verdana", size=20)
-        self.default_font = Font(family="Times New Roman", size=16)
+class _Tk_Menu(Tk.Menu):
+    '''Tk.Menu extended with .add_shortcut method.
+       Note, this is a kludge just to get Command-key shortcuts to
+       work on macOS.  Other modifiers like Ctrl-, Shift- and Option-
+       are not handled in this code.
+    '''
+    _shortcuts_entries = {}
+    _shortcuts_widget  = None
 
-        # create vlc instance
-        self.vlc_instance, self.vlc_media_player_instance = self.create_vlc_instance()
+    def add_shortcut(self, label='', key='', command=None, **kwds):
+        '''Like Tk.menu.add_command extended with shortcut key.
+           If needed use modifiers like Shift- and Alt_ or Option-
+           as before the shortcut key character.  Do not include
+           the Command- or Control- modifier nor the <...> brackets
+           since those are handled here, depending on platform and
+           as needed for the binding.
+        '''
+        # <https://TkDocs.com/tutorial/menus.html>
+        if not key:
+            self.add_command(label=label, command=command, **kwds)
 
-        # main menubar
-        self.menubar = tk.Menu(self.container_instance)
-        self.menubar.config(font=self.menu_font)
+        elif _isMacOS:
+            # keys show as upper-case, always
+            self.add_command(label=label, accelerator='Command-' + key,
+                                          command=command, **kwds)
+            self.bind_shortcut(key, command, label)
 
-        # cascading file menu
-        self.file_menu = tk.Menu(self.menubar, tearoff=0)
-        self.create_file_menu()
+        else:  # XXX not tested, not tested, not tested
+            self.add_command(label=label, underline=label.lower().index(key),
+                                          command=command, **kwds)
+            self.bind_shortcut(key, command, label)
 
-        # cascading list menu
-        self.list_menu = tk.Menu(self.menubar, tearoff=0)
-        self.create_list_menu()
+    def bind_shortcut(self, key, command, label=None):
+        """Bind shortcut key, default modifier Command/Control.
+        """
+        # The accelerator modifiers on macOS are Command-,
+        # Ctrl-, Option- and Shift-, but for .bind[_all] use
+        # <Command-..>, <Ctrl-..>, <Option_..> and <Shift-..>,
+        # <https://www.Tcl.Tk/man/tcl8.6/TkCmd/bind.htm#M6>
+        if self._shortcuts_widget:
+            if C_Key.lower() not in key.lower():
+                key = "<%s%s>" % (C_Key, key.lstrip('<').rstrip('>'))
+            self._shortcuts_widget.bind(key, command)
+            # remember the shortcut key for this menu item
+            if label is not None:
+                item = self.index(label)
+                self._shortcuts_entries[item] = key
+        # The Tk modifier for macOS' Command key is called
+        # Meta, but there is only Meta_L[eft], no Meta_R[ight]
+        # and both keyboard command keys generate Meta_L events.
+        # Similarly for macOS' Option key, the modifier name is
+        # Alt and there's only Alt_L[eft], no Alt_R[ight] and
+        # both keyboard option keys generate Alt_L events.  See:
+        # <https://StackOverflow.com/questions/6378556/multiple-
+        # key-event-bindings-in-tkinter-control-e-command-apple-e-etc>
 
-        # other menus
-        self.menubar.add_command(label="More", command=None)
-        self.menubar.add_command(label="Debug", command=self._debug)
-        self.menubar.add_command(label="Quit", command=self.close)
-        self.container_instance.config(menu=self.menubar)
-    
-        # vlc video frame
-        self.video_panel = ttk.Frame(self.container_instance)
-        self.canvas = tk.Canvas(self.video_panel, background='black')
-        self.canvas.pack(fill=tk.BOTH, expand=1)
-        self.video_panel.pack(fill=tk.BOTH, expand=1)
+    def bind_shortcuts_to(self, widget):
+        '''Set the widget for the shortcut keys, usually root.
+        '''
+        self._shortcuts_widget = widget
 
-        # controls
-        self.create_control_panel()
+    def entryconfig(self, item, **kwds):
+        """Update shortcut key binding if menu entry changed.
+        """
+        Tk.Menu.entryconfig(self, item, **kwds)
+        # adjust the shortcut key binding also
+        if self._shortcuts_widget:
+            key = self._shortcuts_entries.get(item, None)
+            if key is not None and "command" in kwds:
+                self._shortcuts_widget.bind(key, kwds["command"])
 
-    def _debug(self):
-        """Debugging."""
-        import pdb; pdb.set_trace()
-        pass
 
-    def create_control_panel(self):
-        """Add control panel."""
-        control_panel = ttk.Frame(self.container_instance)
-        pause = ttk.Button(control_panel, text="Pause", command=self.pause)
-        play = ttk.Button(control_panel, text="Play", command=self.play)
-        stop = ttk.Button(control_panel, text="Stop", command=self.stop)
-        volume = ttk.Button(control_panel, text="Volume", command=None)
-        pause.pack(side=tk.LEFT)
-        play.pack(side=tk.LEFT)
-        stop.pack(side=tk.LEFT)
-        volume.pack(side=tk.LEFT)
-        control_panel.pack(side=tk.BOTTOM)
+class Player(Tk.Frame):
+    """The main window has to deal with events.
+    """
+    _geometry = ''
+    _stopped  = None
 
-    def create_vlc_instance(self):
-        """Create a vlc instance; `https://www.olivieraubert.net/vlc/python-ctypes/doc/vlc.MediaPlayer-class.html`"""
-        vlc_instance = vlc.Instance()
-        vlc_media_player_instance = vlc_instance.media_player_new()
-        self.container_instance.update()
-        return vlc_instance, vlc_media_player_instance
+    def __init__(self, parent, title=None, video=''):
+        Tk.Frame.__init__(self, parent)
 
-    def get_handle(self):
-        return self.video_panel.winfo_id()
+        self.parent = parent  # == root
+        self.parent.title(title or "tkVLCplayer")
+        self.video = expanduser(video)
 
-    def play(self):
-        """Play a file."""
-        if not self.vlc_media_player_instance.get_media():
-            self.open()
+        # Menu Bar
+        #   File Menu
+        menubar = Tk.Menu(self.parent)
+        self.parent.config(menu=menubar)
+
+        fileMenu = _Tk_Menu(menubar)
+        fileMenu.bind_shortcuts_to(parent)  # XXX must be root?
+
+        fileMenu.add_shortcut("Open...", 'o', self.OnOpen)
+        fileMenu.add_separator()
+        fileMenu.add_shortcut("Play", 'p', self.OnPlay)  # Play/Pause
+        fileMenu.add_command(label="Stop", command=self.OnStop)
+        fileMenu.add_separator()
+        fileMenu.add_shortcut("Mute", 'm', self.OnMute)
+        fileMenu.add_separator()
+        fileMenu.add_shortcut("Close", 'w' if _isMacOS else 's', self.OnClose)
+        if _isMacOS:  # intended for and tested on macOS
+            fileMenu.add_separator()
+            fileMenu.add_shortcut("Full Screen", 'f', self.OnFullScreen)
+        menubar.add_cascade(label="File", menu=fileMenu)
+        self.fileMenu = fileMenu
+        self.playIndex = fileMenu.index("Play")
+        self.muteIndex = fileMenu.index("Mute")
+
+        # first, top panel shows video
+
+        self.videopanel = ttk.Frame(self.parent)
+        self.canvas = Tk.Canvas(self.videopanel)
+        self.canvas.pack(fill=Tk.BOTH, expand=1)
+        self.videopanel.pack(fill=Tk.BOTH, expand=1)
+
+        # panel to hold buttons
+        self.buttons_panel = Tk.Toplevel(self.parent)
+        self.buttons_panel.title("")
+        self.is_buttons_panel_anchor_active = False
+
+        buttons = ttk.Frame(self.buttons_panel)
+        self.playButton = ttk.Button(buttons, text="Play", command=self.OnPlay)
+        stop            = ttk.Button(buttons, text="Stop", command=self.OnStop)
+        self.muteButton = ttk.Button(buttons, text="Mute", command=self.OnMute)
+        self.playButton.pack(side=Tk.LEFT)
+        stop.pack(side=Tk.LEFT)
+        self.muteButton.pack(side=Tk.LEFT)
+
+        self.volMuted = False
+        self.volVar = Tk.IntVar()
+        self.volSlider = Tk.Scale(buttons, variable=self.volVar, command=self.OnVolume,
+                                  from_=0, to=100, orient=Tk.HORIZONTAL, length=200,
+                                  showvalue=0, label='Volume')
+        self.volSlider.pack(side=Tk.RIGHT)
+        buttons.pack(side=Tk.BOTTOM)
+
+
+        # panel to hold player time slider
+        timers = ttk.Frame(self.buttons_panel)
+        self.timeVar = Tk.DoubleVar()
+        self.timeSliderLast = 0
+        self.timeSlider = Tk.Scale(timers, variable=self.timeVar, command=self.OnTime,
+                                   from_=0, to=1000, orient=Tk.HORIZONTAL, length=500,
+                                   showvalue=0)  # label='Time',
+        self.timeSlider.pack(side=Tk.BOTTOM, fill=Tk.X, expand=1)
+        self.timeSliderUpdate = time.time()
+        timers.pack(side=Tk.BOTTOM, fill=Tk.X)
+
+
+        # VLC player
+        args = []
+        if _isLinux:
+            args.append('--no-xlib')
+        self.Instance = vlc.Instance(args)
+        self.player = self.Instance.media_player_new()
+
+        self.parent.bind("<Configure>", self.OnConfigure)  # catch window resize, etc.
+        self.parent.update()
+
+        # After parent.update() otherwise panel is ignored.
+        self.buttons_panel.overrideredirect(True)
+
+        # Estetic, to keep our video panel at least as wide as our buttons panel.
+        self.parent.minsize(width=502, height=0)
+
+        if _isMacOS:
+            # Only tested on MacOS so far. Enable for other OS after verified tests.
+            self.is_buttons_panel_anchor_active = True
+
+            # Detect dragging of the buttons panel.
+            self.buttons_panel.bind("<Button-1>", lambda event: setattr(self, "has_clicked_on_buttons_panel", event.y < 0))
+            self.buttons_panel.bind("<B1-Motion>", self._DetectButtonsPanelDragging)
+            self.buttons_panel.bind("<ButtonRelease-1>", lambda _: setattr(self, "has_clicked_on_buttons_panel", False))
+            self.has_clicked_on_buttons_panel = False
         else:
-            if self.vlc_media_player_instance.play() == -1:
+            self.is_buttons_panel_anchor_active = False
+
+        self._AnchorButtonsPanel()
+
+        self.OnTick()  # set the timer up
+
+    def OnClose(self, *unused):
+        """Closes the window and quit.
+        """
+        # print("_quit: bye")
+        self.parent.quit()  # stops mainloop
+        self.parent.destroy()  # this is necessary on Windows to avoid
+        # ... Fatal Python Error: PyEval_RestoreThread: NULL tstate
+
+    def _DetectButtonsPanelDragging(self, _):
+        """If our last click was on the boarder
+           we disable the anchor.
+        """
+        if self.has_clicked_on_buttons_panel:
+            self.is_buttons_panel_anchor_active = False
+            self.buttons_panel.unbind("<Button-1>")
+            self.buttons_panel.unbind("<B1-Motion>")
+            self.buttons_panel.unbind("<ButtonRelease-1>")
+
+    def _AnchorButtonsPanel(self):
+        video_height = self.parent.winfo_height()
+        panel_x = self.parent.winfo_x()
+        panel_y = self.parent.winfo_y() + video_height + 23 # 23 seems to put the panel just below our video.
+        panel_height = self.buttons_panel.winfo_height()
+        panel_width = self.parent.winfo_width()
+        self.buttons_panel.geometry("%sx%s+%s+%s" % (panel_width, panel_height, panel_x, panel_y))
+
+    def OnConfigure(self, *unused):
+        """Some widget configuration changed.
+        """
+        # <https://www.Tcl.Tk/man/tcl8.6/TkCmd/bind.htm#M12>
+        self._geometry = ''  # force .OnResize in .OnTick, recursive?
+
+        if self.is_buttons_panel_anchor_active:
+            self._AnchorButtonsPanel()
+
+    def OnFullScreen(self, *unused):
+        """Toggle full screen, macOS only.
+        """
+        # <https://www.Tcl.Tk/man/tcl8.6/TkCmd/wm.htm#M10>
+        f = not self.parent.attributes("-fullscreen")  # or .wm_attributes
+        if f:
+            self._previouscreen = self.parent.geometry()
+            self.parent.attributes("-fullscreen", f)  # or .wm_attributes
+            self.parent.bind("<Escape>", self.OnFullScreen)
+        else:
+            self.parent.attributes("-fullscreen", f)  # or .wm_attributes
+            self.parent.geometry(self._previouscreen)
+            self.parent.unbind("<Escape>")
+
+    def OnMute(self, *unused):
+        """Mute/Unmute audio.
+        """
+        # audio un/mute may be unreliable, see vlc.py docs.
+        self.volMuted = m = not self.volMuted  # self.player.audio_get_mute()
+        self.player.audio_set_mute(m)
+        u = "Unmute" if m else "Mute"
+        self.fileMenu.entryconfig(self.muteIndex, label=u)
+        self.muteButton.config(text=u)
+        # update the volume slider text
+        self.OnVolume()
+
+    def OnOpen(self, *unused):
+        """Pop up a new dialow window to choose a file, then play the selected file.
+        """
+        # if a file is already running, then stop it.
+        self.OnStop()
+        # Create a file dialog opened in the current home directory, where
+        # you can display all kind of files, having as title "Choose a video".
+        video = askopenfilename(initialdir = Path(expanduser("~")),
+                                title = "Choose a video",
+                                filetypes = (("all files", "*.*"),
+                                             ("mp4 files", "*.mp4"),
+                                             ("mov files", "*.mov")))
+        self._Play(video)
+
+    def _Pause_Play(self, playing):
+        # re-label menu item and button, adjust callbacks
+        p = 'Pause' if playing else 'Play'
+        c = self.OnPlay if playing is None else self.OnPause
+        self.fileMenu.entryconfig(self.playIndex, label=p, command=c)
+        # self.fileMenu.bind_shortcut('p', c)  # XXX handled
+        self.playButton.config(text=p, command=c)
+        self._stopped = False
+
+    def _Play(self, video):
+        # helper for OnOpen and OnPlay
+        if isfile(video):  # Creation
+            m = self.Instance.media_new(str(video))  # Path, unicode
+            self.player.set_media(m)
+            self.parent.title("tkVLCplayer - %s" % (basename(video),))
+
+            # set the window id where to render VLC's video output
+            h = self.videopanel.winfo_id()  # .winfo_visualid()?
+            if _isWindows:
+                self.player.set_hwnd(h)
+            elif _isMacOS:
+                # XXX 1) using the videopanel.winfo_id() handle
+                # causes the video to play in the entire panel on
+                # macOS, covering the buttons, sliders, etc.
+                # XXX 2) .winfo_id() to return NSView on macOS?
+                v = _GetNSView(h)
+                if v:
+                    self.player.set_nsobject(v)
+                else:
+                    self.player.set_xwindow(h)  # plays audio, no video
+            else:
+                self.player.set_xwindow(h)  # fails on Windows
+            # FIXME: this should be made cross-platform
+            self.OnPlay()
+
+    def OnPause(self, *unused):
+        """Toggle between Pause and Play.
+        """
+        if self.player.get_media():
+            self._Pause_Play(not self.player.is_playing())
+            self.player.pause()  # toggles
+
+    def OnPlay(self, *unused):
+        """Play video, if none is loaded, open the dialog window.
+        """
+        # if there's no video to play or playing,
+        # open a Tk.FileDialog to select a file
+        if not self.player.get_media():
+            if self.video:
+                self._Play(expanduser(self.video))
+                self.video = ''
+            else:
+                self.OnOpen()
+        # Try to play, if this fails display an error message
+        elif self.player.play():  # == -1
+            self.showError("Unable to play the video.")
+        else:
+            self._Pause_Play(True)
+            # set volume slider to audio level
+            vol = self.player.audio_get_volume()
+            if vol > 0:
+                self.volVar.set(vol)
+                self.volSlider.set(vol)
+
+    def OnResize(self, *unused):
+        """Adjust the window/frame to the video aspect ratio.
+        """
+        g = self.parent.geometry()
+        if g != self._geometry and self.player:
+            u, v = self.player.video_get_size()  # often (0, 0)
+            if v > 0 and u > 0:
+                # get window size and position
+                g, x, y = g.split('+')
+                w, h = g.split('x')
+                # alternatively, use .winfo_...
+                # w = self.parent.winfo_width()
+                # h = self.parent.winfo_height()
+                # x = self.parent.winfo_x()
+                # y = self.parent.winfo_y()
+                # use the video aspect ratio ...
+                if u > v:  # ... for landscape
+                    # adjust the window height
+                    h = round(float(w) * v / u)
+                else:  # ... for portrait
+                    # adjust the window width
+                    w = round(float(h) * u / v)
+                self.parent.geometry("%sx%s+%s+%s" % (w, h, x, y))
+                self._geometry = self.parent.geometry()  # actual
+
+    def OnStop(self, *unused):
+        """Stop the player, resets media.
+        """
+        if self.player:
+            self.player.stop()
+            self._Pause_Play(None)
+            # reset the time slider
+            self.timeSlider.set(0)
+            self._stopped = True
+        # XXX on macOS libVLC prints these error messages:
+        # [h264 @ 0x7f84fb061200] get_buffer() failed
+        # [h264 @ 0x7f84fb061200] thread_get_buffer() failed
+        # [h264 @ 0x7f84fb061200] decode_slice_header error
+        # [h264 @ 0x7f84fb061200] no frame!
+
+    def OnTick(self):
+        """Timer tick, update the time slider to the video time.
+        """
+        if self.player:
+            # since the self.player.get_length may change while
+            # playing, re-set the timeSlider to the correct range
+            t = self.player.get_length() * 1e-3  # to seconds
+            if t > 0:
+                self.timeSlider.config(to=t)
+
+                t = self.player.get_time() * 1e-3  # to seconds
+                # don't change slider while user is messing with it
+                if t > 0 and time.time() > (self.timeSliderUpdate + 2):
+                    self.timeSlider.set(t)
+                    self.timeSliderLast = int(self.timeVar.get())
+        # start the 1 second timer again
+        self.parent.after(1000, self.OnTick)
+        # adjust window to video aspect ratio, done periodically
+        # on purpose since the player.video_get_size() only
+        # returns non-zero sizes after playing for a while
+        if not self._geometry:
+            self.OnResize()
+
+    def OnTime(self, *unused):
+        if self.player:
+            t = self.timeVar.get()
+            if self.timeSliderLast != int(t):
+                # this is a hack. The timer updates the time slider.
+                # This change causes this rtn (the 'slider has changed' rtn)
+                # to be invoked.  I can't tell the difference between when
+                # the user has manually moved the slider and when the timer
+                # changed the slider.  But when the user moves the slider
+                # tkinter only notifies this rtn about once per second and
+                # when the slider has quit moving.
+                # Also, the tkinter notification value has no fractional
+                # seconds.  The timer update rtn saves off the last update
+                # value (rounded to integer seconds) in timeSliderLast if
+                # the notification time (sval) is the same as the last saved
+                # time timeSliderLast then we know that this notification is
+                # due to the timer changing the slider.  Otherwise the
+                # notification is due to the user changing the slider.  If
+                # the user is changing the slider then I have the timer
+                # routine wait for at least 2 seconds before it starts
+                # updating the slider again (so the timer doesn't start
+                # fighting with the user).
+                self.player.set_time(int(t * 1e3))  # milliseconds
+                self.timeSliderUpdate = time.time()
+
+    def OnVolume(self, *unused):
+        """Volume slider changed, adjust the audio volume.
+        """
+        vol = min(self.volVar.get(), 100)
+        v_M = "%d%s" % (vol, " (Muted)" if self.volMuted else '')
+        self.volSlider.config(label="Volume " + v_M)
+        if self.player and not self._stopped:
+            # .audio_set_volume returns 0 if success, -1 otherwise,
+            # e.g. if the player is stopped or doesn't have media
+            if self.player.audio_set_volume(vol):  # and self.player.get_media():
+                self.showError("Failed to set the volume: %s." % (v_M,))
+
+    def showError(self, message):
+        """Display a simple error dialog.
+        """
+        self.OnStop()
+        showerror(self.parent.title(), message)
+
+
+if __name__ == "__main__":
+
+    _video = ''
+
+    while len(sys.argv) > 1:
+        arg = sys.argv.pop(1)
+        if arg.lower() in ('-v', '--version'):
+            # show all versions, sample output on macOS:
+            # % python3 ./tkvlc.py -v
+            # tkvlc.py: 2019.07.28 (tkinter 8.6 /Library/Frameworks/Python.framework/Versions/3.7/lib/libtk8.6.dylib)
+            # vlc.py: 3.0.6109 (Sun Mar 31 20:14:16 2019 3.0.6)
+            # LibVLC version: 3.0.6 Vetinari (0x3000600)
+            # LibVLC compiler: clang: warning: argument unused during compilation: '-mmacosx-version-min=10.7' [-Wunused-command-line-argument]
+            # Plugin path: /Applications/VLC3.0.6.app/Contents/MacOS/plugins
+            # Python: 3.7.4 (64bit) macOS 10.13.6
+
+            # Print version of this vlc.py and of the libvlc
+            print('%s: %s (%s %s %s)' % (basename(__file__), __version__,
+                                         Tk.__name__, Tk.TkVersion, libtk))
+            try:
+                vlc.print_version()
+                vlc.print_python()
+            except AttributeError:
                 pass
+            sys.exit(0)
 
-    def close(self):
-        """Close the window."""
-        self.container.delete_window()
+        elif arg.startswith('-'):
+            print('usage: %s  [-v | --version]  [<video_file_name>]' % (sys.argv[0],))
+            sys.exit(1)
 
-    def pause(self):
-        """Pause the player."""
-        self.vlc_media_player_instance.pause()
+        elif arg:  # video file
+            _video = expanduser(arg)
+            if not isfile(_video):
+                print('%s error: no such file: %r' % (sys.argv[0], arg))
+                sys.exit(1)
 
-    def stop(self):
-        """Stop the player."""
-        self.vlc_media_player_instance.stop()
-
-    def open(self):
-        """New window allowing user to select a file and play."""
-        file = askopenfilename(
-            initialdir=self.initial_directory,
-            filetypes=(
-                ("Audio Video Interleave", "*.avi"),
-                ("Matroska", "*.mkv"),
-            )
-        )
-        if isinstance(file, tuple):
-            return
-        if os.path.isfile(file):
-            self.play_film(file)
-
-    def play_film(self, file):
-        """Invokes the `play` method on the vlc instance for the current file."""
-        directory_name = os.path.dirname(file)
-        file_name = os.path.basename(file)
-        self.Media = self.vlc_instance.media_new(
-            str(os.path.join(directory_name, file_name))
-        )
-        self.Media.get_meta()
-        self.vlc_media_player_instance.set_media(self.Media)
-        self.vlc_media_player_instance.set_xwindow(self.get_handle())
-        self.play()
-
-    @staticmethod
-    def get_film_name(film) -> str:
-        """Removes directory from film name."""
-        return film.split('/')[-1]
-
-    def create_file_menu(self):
-        """Create file menu."""
-        self.file_menu.add_command(label="Open", command=self.open, font=self.default_font, accelerator="ctrl + o")
-        self.file_menu.add_command(label="Search", command=None, font=self.default_font, accelerator="ctrl + s")
-        self.file_menu.add_separator()
-        self.file_menu.add_command(label="Quit", command=self.close, font=("Verdana", 14, "bold"), accelerator="ctrl + q")
-        self.menubar.add_cascade(label="File", menu=self.file_menu)
-
-    def create_film_entry(self, film):
-        """Adds an entry to the `list_menu` for a given film."""
-        self.list_menu.add_command(
-            label=self.get_film_name(film),
-            command=partial(self.play_film, film),
-            font=self.default_font
-        )
-
-    def create_list_menu(self):
-        """List all films present on system."""
-        films = []
-        try:
-            for root, dirs, files in os.walk(str(self.initial_directory)):
-                for file in files:
-                    if file.endswith(('.mkv', '.avi')) and not file.endswith(('.sample.mkv', '.sample.avi')):
-                        films.append(os.path.join(root, file))
-        except TypeError:
-            raise("Error")
-        films.sort(key=lambda s: s.lower().split('/')[-1])
-        [self.create_film_entry(film) for film in films]
-        self.menubar.add_cascade(label="All Films", menu=self.list_menu)
-
-
-class BaseTkContainer:
-    def __init__(self):
-        self.tk_instance = tk.Tk()
-        self.tk_instance.title("py player")
-        self.tk_instance.protocol("WM_DELETE_WINDOW", self.delete_window)
-        self.tk_instance.geometry("1920x1080") # default to 1080p
-        self.tk_instance.configure(background='black')
-        self.theme = ttk.Style()
-        self.theme.theme_use("alt")
-
-    def delete_window(self):
-        tk_instance = self.tk_instance
-        tk_instance.quit()
-        tk_instance.destroy()
-        os._exit(1)
-    
-    def __repr__(self):
-        return "Base tk Container"
-
-
-root = BaseTkContainer()
-player = PyPlayer(root, root.tk_instance, title="pyplayer")
-root.tk_instance.mainloop()
+    # Create a Tk.App() to handle the windowing event loop
+    root = Tk.Tk()
+    player = Player(root, video=_video)
+    root.protocol("WM_DELETE_WINDOW", player.OnClose)  # XXX unnecessary (on macOS)
+    root.mainloop()
